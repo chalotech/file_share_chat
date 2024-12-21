@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2 class="mb-4">Available Files</h2>
+
+<div class="row row-cols-1 row-cols-md-3 g-4">
+    {% for file in files %}
+    <div class="col">
+        <div class="card h-100 file-card">
+            <div class="card-body">
+                <h5 class="card-title">{{ file.original_filename }}</h5>
+                <p class="card-text">{{ file.description }}</p>
+                <p class="card-text">
+                    <small class="text-muted">
+                        Uploaded by {{ file.owner.username }} on {{ file.upload_date.strftime('%Y-%m-%d') }}
+                    </small>
+                </p>
+                
+                <div class="rating mb-2">
+                    {% set avg_rating = (file.ratings|map(attribute='value')|sum / file.ratings|length)|round(1) if file.ratings|length > 0 else 0 %}
+                    {% for _ in range(5) %}
+                        {% if loop.index <= avg_rating|int %}
+                            <i class="fas fa-star"></i>
+                        {% else %}
+                            <i class="far fa-star"></i>
+                        {% endif %}
+                    {% endfor %}
+                    <small class="text-muted">({{ file.ratings|length }} ratings)</small>
+                </div>
+                
+                <div class="d-flex justify-content-between align-items-center">
+                    <a href="{{ url_for('file_detail', file_id=file.id) }}" class="btn btn-primary">View Details</a>
+                    <a href="{{ url_for('download_file', file_id=file.id) }}" class="btn btn-success">
+                        <i class="fas fa-download"></i> Download
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="col-12">
+        <p class="text-center">No files available yet.</p>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}
