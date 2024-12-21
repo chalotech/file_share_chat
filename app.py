@@ -71,14 +71,16 @@ class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(120), nullable=False)
+    password_hash = db.Column(db.String(200), nullable=False)
     is_admin = db.Column(db.Boolean, default=False)
     email_verified = db.Column(db.Boolean, default=False)
-    verification_token = db.Column(db.String(100), unique=True)
-    token_expiry = db.Column(db.DateTime)
-    files = db.relationship('File', backref='owner', lazy=True)
-    comments = db.relationship('Comment', backref='author', lazy=True)
-    ratings = db.relationship('Rating', backref='user', lazy=True)
+    verification_token = db.Column(db.String(100), unique=True, nullable=True)
+    token_expiry = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    
+    files = db.relationship('File', backref='owner', lazy=True, cascade='all, delete-orphan')
+    comments = db.relationship('Comment', backref='author', lazy=True, cascade='all, delete-orphan')
+    ratings = db.relationship('Rating', backref='user', lazy=True, cascade='all, delete-orphan')
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -86,91 +88,35 @@ class User(UserMixin, db.Model):
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
-    def generate_verification_token(self):
-        if not self.verification_token:
-            self.verification_token = secrets.token_urlsafe(32)
-            db.session.commit()
-        return self.verification_token
-
-    def send_verification_email(self):
-        try:
-            token = self.generate_verification_token()
-            verification_url = url_for('verify_email', token=token, _external=True)
-            
-            msg = Message('Welcome to FileShare - Please Verify Your Email',
-                         sender=app.config['MAIL_DEFAULT_SENDER'],
-                         recipients=[self.email])
-            
-            msg.body = f'''Hello {self.username},
-            Welcome to FileShare! We're excited to have you join our community.
-            To complete your registration and access all features of FileShare, please verify your email address by clicking the link below:
-            {verification_url}
-            This link will expire in 24 hours for security purposes.
-            If you did not create an account with FileShare, please ignore this email.
-            Best regards,
-            The FileShare Team
-            Contact: chalomtech4@gmail.com'''
-            
-            msg.html = f'''
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 5px;">
-                <h1 style="color: #2c3e50; text-align: center;">Welcome to FileShare!</h1>
-                <p style="color: #34495e;">Hello {self.username},</p>
-                <p style="color: #34495e;">We're excited to have you join our community.</p>
-                <p style="color: #34495e;">To complete your registration and access all features of FileShare, please verify your email address by clicking the button below:</p>
-                <div style="text-align: center; margin: 30px 0;">
-                    <a href="{verification_url}" style="background-color: #3498db; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">Verify Email Address</a>
-                </div>
-                <p style="color: #7f8c8d; font-size: 0.9em;">This link will expire in 24 hours for security purposes.</p>
-                <p style="color: #7f8c8d; font-size: 0.9em;">If you did not create an account with FileShare, please ignore this email.</p>
-                <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
-                <div style="text-align: center; color: #7f8c8d; font-size: 0.8em;">
-                    <p>Best regards,<br>The FileShare Team</p>
-                    <p>Contact: chalomtech4@gmail.com</p>
-                </div>
-            </div>
-            '''
-            
-            logger.debug(f"Attempting to send email to {self.email}")
-            mail.send(msg)
-            logger.debug("Email sent successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Error sending email: {str(e)}")
-            raise
+    def get_id(self):
+        return str(self.id)
 
 class File(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     filename = db.Column(db.String(255), nullable=False)
     original_filename = db.Column(db.String(255), nullable=False)
-    description = db.Column(db.Text)
+    description = db.Column(db.Text, nullable=True)
     upload_date = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     file_path = db.Column(db.String(500), nullable=False)
-    file_size = db.Column(db.Integer)  # Size in bytes
-    mime_type = db.Column(db.String(100))
+    file_size = db.Column(db.Integer, nullable=True)
+    mime_type = db.Column(db.String(100), nullable=True)
     is_deleted = db.Column(db.Boolean, default=False)
     
     comments = db.relationship('Comment', backref='file', lazy=True, cascade='all, delete-orphan')
     ratings = db.relationship('Rating', backref='file', lazy=True, cascade='all, delete-orphan')
-    
-    def __repr__(self):
-        return f'<File {self.filename}>'
-    
-    def get_average_rating(self):
-        if not self.ratings:
-            return 0
-        return sum(r.value for r in self.ratings) / len(self.ratings)
 
 class Comment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     content = db.Column(db.Text, nullable=False)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     file_id = db.Column(db.Integer, db.ForeignKey('file.id'), nullable=False)
 
 class Rating(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    value = db.Column(db.Integer, nullable=False)  # 1-5 stars
+    value = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     file_id = db.Column(db.Integer, db.ForeignKey('file.id'), nullable=False)
 
