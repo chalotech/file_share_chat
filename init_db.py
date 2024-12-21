@@ -12,11 +12,11 @@ def init_db():
         # Create admin user
         admin = User(
             username='charles',
-            email='admin@example.com',
-            password_hash=generate_password_hash('chalo'),
+            email='chalomtech4@gmail.com',
             is_admin=True,
             email_verified=True
         )
+        admin.set_password('chalo')
         
         db.session.add(admin)
         db.session.commit()
