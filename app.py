@@ -130,13 +130,26 @@ class User(UserMixin, db.Model):
 
 class File(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    filename = db.Column(db.String(200), nullable=False)
-    original_filename = db.Column(db.String(200), nullable=False)
+    filename = db.Column(db.String(255), nullable=False)
+    original_filename = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text)
-    upload_date = db.Column(db.DateTime, default=datetime.utcnow)
+    upload_date = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    comments = db.relationship('Comment', backref='file', lazy=True)
-    ratings = db.relationship('Rating', backref='file', lazy=True)
+    file_path = db.Column(db.String(500), nullable=False)
+    file_size = db.Column(db.Integer)  # Size in bytes
+    mime_type = db.Column(db.String(100))
+    is_deleted = db.Column(db.Boolean, default=False)
+    
+    comments = db.relationship('Comment', backref='file', lazy=True, cascade='all, delete-orphan')
+    ratings = db.relationship('Rating', backref='file', lazy=True, cascade='all, delete-orphan')
+    
+    def __repr__(self):
+        return f'<File {self.filename}>'
+    
+    def get_average_rating(self):
+        if not self.ratings:
+            return 0
+        return sum(r.value for r in self.ratings) / len(self.ratings)
 
 class Comment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -150,6 +163,49 @@ class Rating(db.Model):
     value = db.Column(db.Integer, nullable=False)  # 1-5 stars
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     file_id = db.Column(db.Integer, db.ForeignKey('file.id'), nullable=False)
+
+# Error handlers
+@app.errorhandler(404)
+def not_found_error(error):
+    return render_template('error.html', error_code=404, message="Page not found"), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    db.session.rollback()
+    return render_template('error.html', error_code=500, message="Internal server error"), 500
+
+@app.errorhandler(403)
+def forbidden_error(error):
+    return render_template('error.html', error_code=403, message="Access forbidden"), 403
+
+@app.errorhandler(401)
+def unauthorized_error(error):
+    return render_template('error.html', error_code=401, message="Unauthorized access"), 401
+
+# Add logging configuration
+if not app.debug:
+    import logging
+    from logging.handlers import RotatingFileHandler
+    import os
+    
+    # Create logs directory if it doesn't exist
+    if not os.path.exists('logs'):
+        os.mkdir('logs')
+    
+    # Configure file handler
+    file_handler = RotatingFileHandler('logs/file_share.log', maxBytes=10240, backupCount=10)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+    ))
+    file_handler.setLevel(logging.INFO)
+    app.logger.addHandler(file_handler)
+    
+    app.logger.setLevel(logging.INFO)
+    app.logger.info('FileShare startup')
+
+def allowed_file(filename):
+    ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'zip', 'rar'}
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 # Routes
 @app.route('/')
@@ -247,35 +303,63 @@ def resend_verification():
 
 @app.route('/upload', methods=['GET', 'POST'])
 @login_required
-def upload():
+def upload_file():
     if not current_user.is_admin:
         flash('Only admins can upload files')
         return redirect(url_for('index'))
         
     if request.method == 'POST':
-        if 'file' not in request.files:
-            flash('No file part')
-            return redirect(request.url)
-        file = request.files['file']
-        if file.filename == '':
-            flash('No selected file')
+        try:
+            # Check if the post request has the file part
+            if 'file' not in request.files:
+                flash('No file part', 'error')
+                return redirect(request.url)
+            
+            file = request.files['file']
+            
+            # If user does not select file, browser also submits an empty part without filename
+            if file.filename == '':
+                flash('No selected file', 'error')
+                return redirect(request.url)
+            
+            if not allowed_file(file.filename):
+                flash('File type not allowed', 'error')
+                return redirect(request.url)
+            
+            if file and allowed_file(file.filename):
+                # Secure the filename
+                filename = secure_filename(file.filename)
+                
+                # Create uploads directory if it doesn't exist
+                if not os.path.exists(app.config['UPLOAD_FOLDER']):
+                    os.makedirs(app.config['UPLOAD_FOLDER'])
+                
+                # Save the file
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                file.save(file_path)
+                
+                # Create file record in database
+                new_file = File(
+                    filename=filename,
+                    original_filename=file.filename,
+                    description=request.form.get('description'),
+                    user_id=current_user.id,
+                    file_path=file_path,
+                    file_size=os.path.getsize(file_path),
+                    mime_type=file.mimetype
+                )
+                db.session.add(new_file)
+                db.session.commit()
+                
+                flash('File successfully uploaded', 'success')
+                return redirect(url_for('index'))
+                
+        except Exception as e:
+            app.logger.error(f'Error uploading file: {str(e)}')
+            db.session.rollback()
+            flash('Error uploading file', 'error')
             return redirect(request.url)
             
-        if file:
-            filename = secure_filename(file.filename)
-            saved_filename = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{filename}"
-            file.save(os.path.join(app.config['UPLOAD_FOLDER'], saved_filename))
-            
-            new_file = File(
-                filename=saved_filename,
-                original_filename=filename,
-                description=request.form.get('description'),
-                user_id=current_user.id
-            )
-            db.session.add(new_file)
-            db.session.commit()
-            flash('File uploaded successfully')
-            return redirect(url_for('index'))
     return render_template('upload.html')
 
 @app.route('/file/<int:file_id>', methods=['GET', 'POST'])
