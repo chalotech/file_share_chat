@@ -4,7 +4,7 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from flask_mail import Mail, Message
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import secrets
 from dotenv import load_dotenv
@@ -61,7 +61,10 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 @login_manager.user_loader
 def load_user(user_id):
-    return User.query.get(int(user_id))
+    try:
+        return User.query.get(int(user_id))
+    except:
+        return None
 
 # Models
 class User(UserMixin, db.Model):
@@ -72,9 +75,16 @@ class User(UserMixin, db.Model):
     is_admin = db.Column(db.Boolean, default=False)
     email_verified = db.Column(db.Boolean, default=False)
     verification_token = db.Column(db.String(100), unique=True)
+    token_expiry = db.Column(db.DateTime)
     files = db.relationship('File', backref='owner', lazy=True)
     comments = db.relationship('Comment', backref='author', lazy=True)
     ratings = db.relationship('Rating', backref='user', lazy=True)
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
 
     def generate_verification_token(self):
         if not self.verification_token:
@@ -217,89 +227,183 @@ def index():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    if current_user.is_authenticated:
+        return redirect(url_for('index'))
+        
     if request.method == 'POST':
-        user = User.query.filter_by(username=request.form.get('username')).first()
-        if user and check_password_hash(user.password_hash, request.form.get('password')):
-            if not user.email_verified and not user.is_admin:
-                flash('Please verify your email before logging in.')
+        try:
+            email = request.form.get('email')
+            password = request.form.get('password')
+            
+            if not email or not password:
+                flash('Please fill in all fields', 'error')
                 return redirect(url_for('login'))
             
-            login_user(user)
-            return redirect(url_for('index'))
-        flash('Invalid username or password')
+            user = User.query.filter_by(email=email).first()
+            
+            if user is None:
+                flash('Invalid email address', 'error')
+                return redirect(url_for('login'))
+                
+            if not user.check_password(password):
+                flash('Invalid password', 'error')
+                return redirect(url_for('login'))
+                
+            if not user.email_verified:
+                flash('Please verify your email before logging in', 'error')
+                return redirect(url_for('login'))
+            
+            login_user(user, remember=True)
+            flash('Logged in successfully', 'success')
+            
+            next_page = request.args.get('next')
+            return redirect(next_page or url_for('index'))
+            
+        except Exception as e:
+            app.logger.error(f'Login error: {str(e)}')
+            flash('An error occurred during login', 'error')
+            return redirect(url_for('login'))
+            
     return render_template('login.html')
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
+    if current_user.is_authenticated:
+        return redirect(url_for('index'))
+        
     if request.method == 'POST':
         try:
-            username = request.form.get('username')
             email = request.form.get('email')
+            username = request.form.get('username')
             password = request.form.get('password')
+            confirm_password = request.form.get('confirm_password')
             
-            if User.query.filter_by(username=username).first():
-                flash('Username already exists')
+            if not all([email, username, password, confirm_password]):
+                flash('Please fill in all fields', 'error')
+                return redirect(url_for('register'))
+            
+            if password != confirm_password:
+                flash('Passwords do not match', 'error')
                 return redirect(url_for('register'))
                 
             if User.query.filter_by(email=email).first():
-                flash('Email already registered')
+                flash('Email already registered', 'error')
                 return redirect(url_for('register'))
                 
+            if User.query.filter_by(username=username).first():
+                flash('Username already taken', 'error')
+                return redirect(url_for('register'))
+            
             user = User(
-                username=username,
                 email=email,
-                password_hash=generate_password_hash(password),
+                username=username,
                 email_verified=False
             )
+            user.set_password(password)
             
-            logger.debug(f"Creating new user: {username}, {email}")
+            # Generate verification token
+            token = secrets.token_urlsafe(32)
+            user.verification_token = token
+            user.token_expiry = datetime.utcnow() + timedelta(hours=24)
+            
             db.session.add(user)
             db.session.commit()
-            logger.debug("User created successfully")
             
-            try:
-                user.send_verification_email()
-                flash('Registration successful! Please check your email to verify your account.')
-                logger.debug("Verification email sent successfully")
-            except Exception as e:
-                logger.error(f"Failed to send verification email: {str(e)}")
-                flash('Registration successful! However, we could not send the verification email. Please try again later.')
-                
+            # Send verification email
+            verification_url = url_for('verify_email', token=token, _external=True)
+            send_verification_email(user.email, verification_url)
+            
+            flash('Registration successful! Please check your email to verify your account.', 'success')
             return redirect(url_for('login'))
+            
         except Exception as e:
-            logger.error(f"Registration error: {str(e)}")
-            flash('An error occurred during registration. Please try again.')
+            db.session.rollback()
+            app.logger.error(f'Registration error: {str(e)}')
+            flash('An error occurred during registration', 'error')
             return redirect(url_for('register'))
             
     return render_template('register.html')
 
+def send_verification_email(email, verification_url):
+    try:
+        msg = Message('Verify your email',
+                    sender=app.config['MAIL_DEFAULT_SENDER'],
+                    recipients=[email])
+        msg.body = f'''Please click the following link to verify your email:
+{verification_url}
+
+If you did not make this request, please ignore this email.
+
+Best regards,
+Chalo FileShare Team
+'''
+        mail.send(msg)
+    except Exception as e:
+        app.logger.error(f'Error sending verification email: {str(e)}')
+        raise
+
 @app.route('/verify-email/<token>')
 def verify_email(token):
-    user = User.query.filter_by(verification_token=token).first()
-    if user:
+    try:
+        user = User.query.filter_by(verification_token=token).first()
+        
+        if not user:
+            flash('Invalid verification token', 'error')
+            return redirect(url_for('login'))
+            
+        if user.token_expiry < datetime.utcnow():
+            flash('Verification token has expired', 'error')
+            return redirect(url_for('login'))
+            
         user.email_verified = True
         user.verification_token = None
+        user.token_expiry = None
         db.session.commit()
-        flash('Your email has been verified! You can now log in.')
-    else:
-        flash('Invalid or expired verification link.')
-    return redirect(url_for('login'))
+        
+        flash('Email verified successfully! You can now log in.', 'success')
+        return redirect(url_for('login'))
+        
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f'Email verification error: {str(e)}')
+        flash('An error occurred during email verification', 'error')
+        return redirect(url_for('login'))
 
 @app.route('/resend-verification')
-@login_required
 def resend_verification():
-    if current_user.email_verified:
-        flash('Your email is already verified.')
-        return redirect(url_for('index'))
-    
     try:
-        current_user.send_verification_email()
-        flash('Verification email has been resent. Please check your inbox.')
+        email = request.args.get('email')
+        if not email:
+            flash('Email address is required', 'error')
+            return redirect(url_for('login'))
+            
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            flash('Email address not found', 'error')
+            return redirect(url_for('login'))
+            
+        if user.email_verified:
+            flash('Email is already verified', 'info')
+            return redirect(url_for('login'))
+            
+        # Generate new verification token
+        token = secrets.token_urlsafe(32)
+        user.verification_token = token
+        user.token_expiry = datetime.utcnow() + timedelta(hours=24)
+        db.session.commit()
+        
+        # Send new verification email
+        verification_url = url_for('verify_email', token=token, _external=True)
+        send_verification_email(user.email, verification_url)
+        
+        flash('Verification email has been resent', 'success')
+        return redirect(url_for('login'))
+        
     except Exception as e:
-        logger.error(f"Failed to resend verification email: {str(e)}")
-        flash('Could not send verification email. Please try again later.')
-    
-    return redirect(url_for('index'))
+        db.session.rollback()
+        app.logger.error(f'Resend verification error: {str(e)}')
+        flash('An error occurred while resending verification email', 'error')
+        return redirect(url_for('login'))
 
 @app.route('/upload', methods=['GET', 'POST'])
 @login_required
@@ -417,10 +521,10 @@ if __name__ == '__main__':
             admin = User(
                 username='charles',
                 email='chalomtech4@gmail.com',
-                password_hash=generate_password_hash('chalo'),
-                is_admin=True,
                 email_verified=True
             )
+            admin.set_password('chalo')
+            admin.is_admin = True
             db.session.add(admin)
             db.session.commit()
             print("Admin user 'charles' created successfully!")
